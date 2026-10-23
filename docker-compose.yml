@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bahitung
+      POSTGRES_USER: bahitung
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bahitung_local_only}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - bahitung_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bahitung -d bahitung"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+volumes:
+  bahitung_pgdata:

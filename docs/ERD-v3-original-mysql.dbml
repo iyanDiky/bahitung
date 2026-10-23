@@ -1,0 +1,210 @@
+Project RumahFin_v3 {
+  database_type: 'MySQL'
+  Note: 'Shared household finance MVP; IDR only; ledger entries immutable; posting reversals, no hard delete.'
+}
+Enum member_role { owner admin member viewer }
+Enum membership_status { active suspended removed }
+Enum invite_status { pending accepted declined revoked }
+Enum wallet_type { cash bank ewallet other }
+Enum category_type { income expense }
+Enum operation_type { opening income expense transfer adjustment goal_contribution goal_withdrawal }
+Enum operation_status { posted reversed }
+Enum budget_status { active archived }
+Enum goal_status { active completed archived }
+Enum bucket_kind { wallet goal }
+
+Table users {
+ id bigint [pk, increment]
+ name varchar(150) [not null]
+ email varchar(255) [not null, unique]
+ email_verified_at datetime
+ password varchar(255) [not null]
+ created_at datetime
+ updated_at datetime
+}
+Table households {
+ id bigint [pk, increment]
+ name varchar(150) [not null]
+ currency_code char(3) [not null, default: 'IDR']
+ timezone varchar(64) [not null, default: 'Asia/Makassar']
+ created_by_user_id bigint [not null, ref: > users.id]
+ archived_at datetime
+ created_at datetime
+ updated_at datetime
+}
+Table household_members {
+ id bigint [pk, increment]
+ household_id bigint [not null, ref: > households.id]
+ user_id bigint [not null, ref: > users.id]
+ role member_role [not null]
+ status membership_status [not null, default: 'active']
+ joined_at datetime [not null]
+ left_at datetime
+ created_at datetime
+ updated_at datetime
+ indexes {
+  (household_id, user_id) [unique]
+  (id, household_id) [unique]
+  (household_id, role, status)
+ }
+ Note: 'Exactly one active owner ensured transactionally with household row lock; users can belong to many households.'
+}
+Table household_invitations {
+ id bigint [pk, increment]
+ household_id bigint [not null, ref: > households.id]
+ invited_email varchar(255) [not null]
+ target_role member_role [not null]
+ token_hash char(64) [not null, unique]
+ status invite_status [not null, default: 'pending']
+ expires_at datetime [not null]
+ invited_by_member_id bigint [not null, ref: > household_members.id]
+ accepted_by_user_id bigint [ref: > users.id]
+ accepted_at datetime
+ revoked_at datetime
+ created_at datetime
+ updated_at datetime
+ indexes { (household_id, invited_email, status) }
+ Note: 'Target role only member/viewer for MVP; email must be verified and match token invite.'
+}
+Table wallets {
+ id bigint [pk, increment]
+ household_id bigint [not null, ref: > households.id]
+ name varchar(120) [not null]
+ type wallet_type [not null]
+ is_archived boolean [not null, default: false]
+ created_by_member_id bigint [not null, ref: > household_members.id]
+ created_at datetime
+ updated_at datetime
+ indexes { (id,household_id) [unique] (household_id,is_archived) }
+ Note: 'All wallets shared and visible to active household members; opening transaction, not initial_balance field.'
+}
+Table categories {
+ id bigint [pk, increment]
+ household_id bigint [not null, ref: > households.id]
+ name varchar(120) [not null]
+ type category_type [not null]
+ is_archived boolean [not null, default: false]
+ created_at datetime
+ updated_at datetime
+ indexes { (id,household_id) [unique] (household_id,type,name) [unique] }
+}
+Table goals {
+ id bigint [pk, increment]
+ household_id bigint [not null, ref: > households.id]
+ name varchar(150) [not null]
+ target_amount decimal(19,2) [not null]
+ target_date date
+ status goal_status [not null, default: 'active']
+ created_by_member_id bigint [not null, ref: > household_members.id]
+ created_at datetime
+ updated_at datetime
+ indexes { (id,household_id) [unique] }
+ Note: 'Goal is a reserved fund bucket. Contribution/withdrawal redistributes assets, never expense/income.'
+}
+Table operations {
+ id bigint [pk, increment]
+ household_id bigint [not null, ref: > households.id]
+ type operation_type [not null]
+ status operation_status [not null, default: 'posted']
+ amount decimal(19,2) [not null]
+ occurred_on date [not null]
+ note text
+ category_id bigint [ref: > categories.id]
+ created_by_member_id bigint [not null, ref: > household_members.id]
+ correction_of_id bigint [ref: > operations.id]
+ reversed_at datetime
+ reversed_by_member_id bigint [ref: > household_members.id]
+ reversal_reason varchar(500)
+ idempotency_key varchar(100) [not null]
+ payload_hash char(64) [not null]
+ created_at datetime
+ updated_at datetime
+ indexes {
+  (household_id,idempotency_key) [unique]
+  (id,household_id) [unique]
+  (household_id,occurred_on,type,status)
+  (correction_of_id)
+ }
+ Note: 'Posted movement rows immutable. Reversal is new counter-movements via operation_reversals; original status reversed, and original ledger stays in history. A correction is reversal + new operation in one DB transaction.'
+}
+Table balance_movements {
+ id bigint [pk, increment]
+ household_id bigint [not null, ref: > households.id]
+ operation_id bigint [not null, ref: > operations.id]
+ wallet_id bigint [ref: > wallets.id]
+ goal_id bigint [ref: > goals.id]
+ amount_signed decimal(19,2) [not null]
+ entry_kind varchar(16) [not null, note: 'original or reversal']
+ reversed_movement_id bigint [ref: > balance_movements.id]
+ created_at datetime [not null]
+ indexes { (operation_id) (wallet_id,id) (goal_id,id) (household_id,id) (reversed_movement_id) [unique] }
+ Note: 'Exactly one of wallet_id, goal_id non-null; nonzero signed amount; original immutable, reversal mirrors sign and references original; no update/delete.'
+}
+Table operation_reversals {
+ id bigint [pk, increment]
+ household_id bigint [not null, ref: > households.id]
+ operation_id bigint [not null, unique, ref: > operations.id]
+ reversed_by_member_id bigint [not null, ref: > household_members.id]
+ reason varchar(500) [not null]
+ created_at datetime [not null]
+ Note: 'Audit identity for reversal; one reversal per operation, reversal movement rows tied to same operation with entry_kind reversal.'
+}
+Table wallet_balances {
+ wallet_id bigint [pk, ref: > wallets.id]
+ household_id bigint [not null, ref: > households.id]
+ balance decimal(19,2) [not null, default: 0]
+ updated_at datetime
+ Note: 'Atomically maintained locked projection of SUM(all wallet movements). Reconstructible from ledger; never user-editable.'
+}
+Table goal_balances {
+ goal_id bigint [pk, ref: > goals.id]
+ household_id bigint [not null, ref: > households.id]
+ balance decimal(19,2) [not null, default: 0]
+ updated_at datetime
+ Note: 'Locked projection; non-negative; reconstructible from all goal movements.'
+}
+Table transfer_details {
+ operation_id bigint [pk, ref: > operations.id]
+ source_wallet_id bigint [not null, ref: > wallets.id]
+ destination_wallet_id bigint [not null, ref: > wallets.id]
+ transfer_amount decimal(19,2) [not null]
+ fee_amount decimal(19,2) [not null, default: 0]
+ fee_category_id bigint [ref: > categories.id]
+ Note: 'Fee is a separate -wallet movement in same operation; reporting recognizes this part as expense, not transfer value.'
+}
+Table budgets {
+ id bigint [pk, increment]
+ household_id bigint [not null, ref: > households.id]
+ month_start date [not null]
+ status budget_status [not null, default: 'active']
+ copied_from_budget_id bigint [ref: > budgets.id]
+ created_by_member_id bigint [not null, ref: > household_members.id]
+ created_at datetime
+ updated_at datetime
+ indexes { (household_id,month_start) [unique] (id,household_id) [unique] }
+ Note: 'Monthly container. Copy from previous month is explicit action, never auto-copy. Past budgets can remain editable by owner/admin with audit.'
+}
+Table budget_lines {
+ id bigint [pk, increment]
+ budget_id bigint [not null, ref: > budgets.id]
+ category_id bigint [not null, ref: > categories.id]
+ limit_amount decimal(19,2) [not null]
+ created_at datetime
+ updated_at datetime
+ indexes { (budget_id,category_id) [unique] }
+ Note: 'Expense categories only; >0 limit. Usage computed from net effective expense, including transfer fees by category.'
+}
+Table audit_logs {
+ id bigint [pk, increment]
+ household_id bigint [not null, ref: > households.id]
+ actor_member_id bigint [ref: > household_members.id]
+ action varchar(100) [not null]
+ subject_type varchar(100) [not null]
+ subject_id bigint [not null]
+ before_json json
+ after_json json
+ metadata_json json
+ created_at datetime [not null]
+ indexes { (household_id,created_at) (subject_type,subject_id) }
+ Note: 'Append only. Financial events and changes in roles, invitations, budgets, wallets, goals are audited. No secrets in snapshots.'
+}

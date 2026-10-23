@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${BAHITUNG_PHP:-}" ]]; then
+  runtime="$BAHITUNG_PHP"
+elif [[ -x /opt/homebrew/opt/php@8.4/bin/php ]]; then
+  runtime=/opt/homebrew/opt/php@8.4/bin/php
+else
+  runtime="$(command -v php)"
+fi
+"$runtime" -r 'exit(PHP_VERSION_ID >= 80400 ? 0 : 1);' || { echo 'Backend lockfile requires PHP 8.4+. Set BAHITUNG_PHP to its binary.' >&2; exit 1; }
+exec "$runtime" "$@"
